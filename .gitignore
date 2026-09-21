@@ -1,0 +1,13 @@
+# Backups and archives
+*.tar.gz
+*.tar
+
+# Local environment & secrets
+.env
+.env.*
+*.key
+*.token
+
+# System artifacts
+.DS_Store
+Thumbs.db
