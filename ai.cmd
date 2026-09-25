@@ -5,6 +5,7 @@ setlocal enabledelayedexpansion
 set "IMAGE=ghcr.io/jjjakob502/ai.cmd:latest"
 if not "%AI_IMAGE%"=="" set "IMAGE=%AI_IMAGE%"
 set "VOLUME=ai-auth"
+if not defined AI_CLIS set "AI_CLIS=claude codex agy grok pi"
 
 if "%~1"=="sync" goto :sub_sync
 if "%~1"=="--sync" goto :sub_sync
@@ -44,7 +45,7 @@ exit /b 1
 :sub_build
 call :detect_engine || exit /b 1
 echo [ai build] Building %IMAGE%...
-%ENGINE_CMD% build -t %IMAGE% "%SCRIPTDIR_PATH%"
+%ENGINE_CMD% build --build-arg "AI_CLIS=%AI_CLIS%" -t %IMAGE% "%SCRIPTDIR_PATH%"
 exit /b %errorlevel%
 
 :sub_export
@@ -114,7 +115,7 @@ call :detect_engine || exit /b 1
     echo [ai] Pulling %IMAGE%...
     %ENGINE_CMD% pull %IMAGE% >nul 2>nul || (
         echo [ai] Pull failed or offline, building locally...
-        %ENGINE_CMD% build -t %IMAGE% "%SCRIPTDIR_PATH%"
+        %ENGINE_CMD% build --build-arg "AI_CLIS=%AI_CLIS%" -t %IMAGE% "%SCRIPTDIR_PATH%"
     )
 )
 %ENGINE_CMD% volume inspect %VOLUME% >nul 2>nul || %ENGINE_CMD% volume create %VOLUME% >nul
@@ -133,6 +134,7 @@ set -eu
 
 IMAGE="${AI_IMAGE:-ghcr.io/jjjakob502/ai.cmd:latest}"
 VOLUME="ai-auth"
+AI_CLIS="${AI_CLIS-claude codex agy grok pi}"
 
 TARGET_FILE="$0"
 while [ -h "$TARGET_FILE" ]; do
@@ -234,7 +236,7 @@ case "${1:-}" in
 
     build|--build)
         echo "[ai build] Building $IMAGE using $ENGINE..."
-        "$ENGINE" build -t "$IMAGE" "$SCRIPT_DIR"
+        "$ENGINE" build --build-arg "AI_CLIS=$AI_CLIS" -t "$IMAGE" "$SCRIPT_DIR"
         echo "[ai build] Build complete."
         exit 0
         ;;
@@ -248,7 +250,7 @@ if ! "$ENGINE" image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "[ai] Pulling $IMAGE..."
     if ! "$ENGINE" pull "$IMAGE" 2>/dev/null; then
         echo "[ai] Pull failed or offline, building locally..."
-        "$ENGINE" build -t "$IMAGE" "$SCRIPT_DIR"
+        "$ENGINE" build --build-arg "AI_CLIS=$AI_CLIS" -t "$IMAGE" "$SCRIPT_DIR"
     fi
 fi
 

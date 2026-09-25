@@ -95,3 +95,36 @@ alias ai="/path/to/ai.cmd/ai.cmd"
 
 **Windows:**
 Add the repository directory to your user `PATH`. You can then run `ai <agent>` in any terminal.
+
+## Choose which CLIs to install
+
+Build a custom image with a space-separated selection:
+
+```bash
+AI_IMAGE=localhost/ai-selected:local AI_CLIS='claude codex' ./ai.cmd --build
+AI_IMAGE=localhost/ai-selected:local ./ai.cmd claude
+```
+
+Windows CMD:
+
+```cmd
+set AI_IMAGE=localhost/ai-selected:local
+set AI_CLIS=claude codex
+ai.cmd --build
+ai.cmd claude
+```
+
+Valid names: `claude`, `codex`, `agy`, `grok`, `pi`. The default installs all five;
+`none` installs no AI CLIs. Git, GitHub CLI and the common toolchain remain included.
+Unknown names fail the build. `AI_CLIS` is a **build-time** setting: changing it
+while running a prebuilt image does not change that image's installed programs.
+Use a separate image tag so a custom build does not replace the upstream tag.
+
+Direct engine build is also supported:
+
+```bash
+podman build --build-arg 'AI_CLIS=claude codex' -t localhost/ai-selected:local .
+```
+
+The selection controls what is shipped, not what a user can install later in a
+writable sandbox. Existing home volumes and saved credentials are not removed.
