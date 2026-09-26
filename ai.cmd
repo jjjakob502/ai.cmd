@@ -15,6 +15,8 @@ if "%~1"=="import" goto :sub_import
 if "%~1"=="--import" goto :sub_import
 if "%~1"=="build" goto :sub_build
 if "%~1"=="--build" goto :sub_build
+if "%~1"=="update" goto :sub_update
+if "%~1"=="--update" goto :sub_update
 goto :sub_run
 
 :detect_engine
@@ -48,6 +50,12 @@ echo [ai build] Building %IMAGE%...
 %ENGINE_CMD% build --build-arg "AI_CLIS=%AI_CLIS%" -t %IMAGE% "%SCRIPTDIR_PATH%"
 exit /b %errorlevel%
 
+:sub_update
+call :detect_engine || exit /b 1
+echo [ai update] Updating %IMAGE%...
+%ENGINE_CMD% pull %IMAGE%
+exit /b %errorlevel%
+
 :sub_export
 call :detect_engine || exit /b 1
 set "OUTFILE=%~2"
@@ -76,7 +84,7 @@ if "%INFILE%"=="" (
     exit /b 1
 )
 echo [ai import] Importing %INFILE% into volume...
-%ENGINE_CMD% run --rm -v %VOLUME%:/data -v "%WORKDIR_PATH%:/in" %IMAGE% sh -c "tar xzf /in/%INFILE% -C /data"
+%ENGINE_CMD% run --rm -v %VOLUME%:/data -v "%WORKDIR_PATH%:/in" %IMAGE% sh -c "tar xzf /in/%INFILE% --keep-newer-files -C /data"
 echo [ai import] Import complete.
 exit /b %errorlevel%
 
@@ -96,13 +104,13 @@ if "%TARGET%"=="" (
 )
 if /i "%ACTION%"=="push" (
     echo [ai sync] Streaming local volume to %TARGET%...
-    %ENGINE_CMD% run --rm -v %VOLUME%:/data %IMAGE% tar czf - -C /data . | ssh %TARGET% "docker run --rm -i -v %VOLUME%:/data %IMAGE% tar xzf - -C /data 2>/dev/null || podman run --rm -i -v %VOLUME%:/data %IMAGE% tar xzf - -C /data 2>/dev/null"
+    %ENGINE_CMD% run --rm -v %VOLUME%:/data %IMAGE% tar czf - --exclude=.cache --exclude=.npm -C /data . | ssh %TARGET% "docker run --rm -i -v %VOLUME%:/data %IMAGE% tar xzf - --keep-newer-files -C /data 2>/dev/null || podman run --rm -i -v %VOLUME%:/data %IMAGE% tar xzf - --keep-newer-files -C /data 2>/dev/null"
     echo [ai sync] Push complete.
     exit /b 0
 )
 if /i "%ACTION%"=="pull" (
     echo [ai sync] Pulling volume from %TARGET%...
-    ssh %TARGET% "docker run --rm -v %VOLUME%:/data %IMAGE% tar czf - -C /data . 2>/dev/null || podman run --rm -v %VOLUME%:/data %IMAGE% tar czf - -C /data . 2>/dev/null" | %ENGINE_CMD% run --rm -i -v %VOLUME%:/data %IMAGE% tar xzf - -C /data
+    ssh %TARGET% "docker run --rm -v %VOLUME%:/data %IMAGE% tar czf - --exclude=.cache --exclude=.npm -C /data . 2>/dev/null || podman run --rm -v %VOLUME%:/data %IMAGE% tar czf - --exclude=.cache --exclude=.npm -C /data . 2>/dev/null" | %ENGINE_CMD% run --rm -i -v %VOLUME%:/data %IMAGE% tar xzf - --keep-newer-files -C /data
     echo [ai sync] Pull complete.
     exit /b 0
 )
@@ -113,12 +121,22 @@ exit /b 1
 call :detect_engine || exit /b 1
 %ENGINE_CMD% image inspect %IMAGE% >nul 2>nul || (
     echo [ai] Pulling %IMAGE%...
-    %ENGINE_CMD% pull %IMAGE% >nul 2>nul || (
+    %ENGINE_CMD% pull %IMAGE% >nul || (
         echo [ai] Pull failed or offline, building locally...
         %ENGINE_CMD% build --build-arg "AI_CLIS=%AI_CLIS%" -t %IMAGE% "%SCRIPTDIR_PATH%"
     )
 )
 %ENGINE_CMD% volume inspect %VOLUME% >nul 2>nul || %ENGINE_CMD% volume create %VOLUME% >nul
+
+if /i "%cd%"=="%USERPROFILE%" if "%AI_ALLOW_HOME%"=="" (
+    echo [ai] Refusing to mount %cd%: it would expose your keys and other secrets. Run from a project folder, or set AI_ALLOW_HOME=1. >&2
+    exit /b 1
+)
+if "%cd:~1%"==":\" if "%AI_ALLOW_HOME%"=="" (
+    echo [ai] Refusing to mount drive root %cd%. Run from a project folder, or set AI_ALLOW_HOME=1. >&2
+    exit /b 1
+)
+if "%AI_NETWORK%"=="" set "AI_NETWORK=host"
 
 set "ARGS=%*"
 if "%~1"=="--" (
@@ -126,7 +144,10 @@ if "%~1"=="--" (
 )
 if "!ARGS!"=="" set "ARGS=/bin/bash"
 
-%ENGINE_CMD% run --rm -it --network host -v "%WORKDIR_PATH%:/workspace" -v %VOLUME%:/root -w /workspace -e TERM -e ANTHROPIC_API_KEY -e OPENAI_API_KEY -e GEMINI_API_KEY -e GROK_API_KEY -e XAI_API_KEY -e GITHUB_TOKEN -e GH_TOKEN %IMAGE% !ARGS!
+set "EXTRA_ENV="
+if defined AI_ENV for %%v in (%AI_ENV%) do set "EXTRA_ENV=!EXTRA_ENV! -e %%v"
+
+%ENGINE_CMD% run --rm -it --network %AI_NETWORK% -v "%WORKDIR_PATH%:/workspace" -v %VOLUME%:/root -w /workspace -e TERM -e ANTHROPIC_API_KEY -e OPENAI_API_KEY -e GEMINI_API_KEY -e GROK_API_KEY -e XAI_API_KEY -e DEEPSEEK_API_KEY -e OPENROUTER_API_KEY -e MISTRAL_API_KEY -e OLLAMA_HOST -e GITHUB_TOKEN -e GH_TOKEN !EXTRA_ENV! %AI_ARGS% %IMAGE% !ARGS!
 exit /b %errorlevel%
 ::CMDLITERAL
 
@@ -173,19 +194,19 @@ case "${1:-}" in
             REMOTE_RECEIVE="docker run --rm -i -v ai-auth:/data $IMAGE tar xzf - -C /data 2>nul || podman run --rm -i -v ai-auth:/data $IMAGE tar xzf - -C /data 2>nul || wsl.exe -d Ubuntu -u root -- podman run --rm -i -v ai-auth:/data $IMAGE tar xzf - -C /data"
             REMOTE_STREAM="docker run --rm -v ai-auth:/data $IMAGE tar czf - -C /data . 2>nul || podman run --rm -v ai-auth:/data $IMAGE tar czf - -C /data . 2>nul || wsl.exe -d Ubuntu -u root -- podman run --rm -v ai-auth:/data $IMAGE tar czf - -C /data ."
         else
-            REMOTE_RECEIVE="docker run --rm -i -v ai-auth:/data $IMAGE tar xzf - -C /data 2>/dev/null || podman run --rm -i -v ai-auth:/data $IMAGE tar xzf - -C /data"
-            REMOTE_STREAM="docker run --rm -v ai-auth:/data $IMAGE tar czf - -C /data . 2>/dev/null || podman run --rm -v ai-auth:/data $IMAGE tar czf - -C /data ."
+            REMOTE_RECEIVE="docker run --rm -i -v ai-auth:/data $IMAGE tar xzf - --keep-newer-files -C /data 2>/dev/null || podman run --rm -i -v ai-auth:/data $IMAGE tar xzf - --keep-newer-files -C /data"
+            REMOTE_STREAM="docker run --rm -v ai-auth:/data $IMAGE tar czf - --exclude=.cache --exclude=.npm -C /data . 2>/dev/null || podman run --rm -v ai-auth:/data $IMAGE tar czf - --exclude=.cache --exclude=.npm -C /data ."
         fi
 
         if [ "$ACTION" = "push" ]; then
             echo "[ai sync] Streaming local volume to $TARGET ($REMOTE_OS)..."
             # shellcheck disable=SC2029
-            "$ENGINE" run --rm -v "$VOLUME:/data" "$IMAGE" tar czf - -C /data . | ssh "$TARGET" "$REMOTE_RECEIVE"
+            "$ENGINE" run --rm -v "$VOLUME:/data" "$IMAGE" tar czf - --exclude=.cache --exclude=.npm -C /data . | ssh "$TARGET" "$REMOTE_RECEIVE"
             echo "[ai sync] Push complete."
         elif [ "$ACTION" = "pull" ]; then
             echo "[ai sync] Pulling volume from $TARGET ($REMOTE_OS)..."
             # shellcheck disable=SC2029
-            ssh "$TARGET" "$REMOTE_STREAM" | "$ENGINE" run --rm -i -v "$VOLUME:/data" "$IMAGE" tar xzf - -C /data
+            ssh "$TARGET" "$REMOTE_STREAM" | "$ENGINE" run --rm -i -v "$VOLUME:/data" "$IMAGE" tar xzf - --keep-newer-files -C /data
             echo "[ai sync] Pull complete."
         fi
         exit 0
@@ -229,7 +250,7 @@ case "${1:-}" in
         DIR_PATH="$(dirname "$FULL_PATH")"
         FILE_NAME="$(basename "$FULL_PATH")"
         echo "[ai import] Importing $FILE_NAME into volume..."
-        "$ENGINE" run --rm -v "$VOLUME:/data" -v "$DIR_PATH:/in" "$IMAGE" tar xzf "/in/$FILE_NAME" -C /data
+        "$ENGINE" run --rm -v "$VOLUME:/data" -v "$DIR_PATH:/in" "$IMAGE" tar xzf "/in/$FILE_NAME" --keep-newer-files -C /data
         echo "[ai import] Import complete."
         exit 0
         ;;
@@ -240,6 +261,13 @@ case "${1:-}" in
         echo "[ai build] Build complete."
         exit 0
         ;;
+
+    update|--update)
+        echo "[ai update] Updating $IMAGE using $ENGINE..."
+        "$ENGINE" pull "$IMAGE"
+        echo "[ai update] Update complete."
+        exit 0
+        ;;
 esac
 
 if [ "${1:-}" = "--" ]; then
@@ -248,7 +276,7 @@ fi
 
 if ! "$ENGINE" image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "[ai] Pulling $IMAGE..."
-    if ! "$ENGINE" pull "$IMAGE" 2>/dev/null; then
+    if ! "$ENGINE" pull -q "$IMAGE" >/dev/null; then
         echo "[ai] Pull failed or offline, building locally..."
         "$ENGINE" build --build-arg "AI_CLIS=$AI_CLIS" -t "$IMAGE" "$SCRIPT_DIR"
     fi
@@ -260,13 +288,28 @@ if [ $# -eq 0 ]; then
     set -- /bin/bash
 fi
 
+case "$(pwd -P)" in
+    "$HOME"|/)
+        if [ -z "${AI_ALLOW_HOME:-}" ]; then
+            echo "[ai] Refusing to mount $(pwd): it would expose ~/.ssh and other secrets. Run from a project folder, or set AI_ALLOW_HOME=1." >&2
+            exit 1
+        fi
+        ;;
+esac
+
 TTY_ARG="-i"
 if [ -t 0 ] && [ -t 1 ]; then
     TTY_ARG="-it"
 fi
 
+EXTRA_ENV=""
+for var in ${AI_ENV:-}; do
+    EXTRA_ENV="$EXTRA_ENV -e $var"
+done
+
+# shellcheck disable=SC2086
 exec "$ENGINE" run --rm $TTY_ARG \
-    --network host \
+    --network "${AI_NETWORK:-host}" \
     -v "$(pwd):/workspace" \
     -v "$VOLUME:/root" \
     -w /workspace \
@@ -276,7 +319,13 @@ exec "$ENGINE" run --rm $TTY_ARG \
     -e GEMINI_API_KEY \
     -e GROK_API_KEY \
     -e XAI_API_KEY \
+    -e DEEPSEEK_API_KEY \
+    -e OPENROUTER_API_KEY \
+    -e MISTRAL_API_KEY \
+    -e OLLAMA_HOST \
     -e GITHUB_TOKEN \
     -e GH_TOKEN \
+    $EXTRA_ENV \
+    ${AI_ARGS:-} \
     "$IMAGE" \
     "$@"
