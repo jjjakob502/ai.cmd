@@ -1,0 +1,117 @@
+name: Build and Publish Multi-Arch Image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0' # Rebuild weekly on Sundays to keep agent CLIs updated
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=run-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Extract Dockerfile
+        run: ./ai.cmd dockerfile > Dockerfile
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            AI_SOURCE_REVISION=${{ github.sha }}
+            AI_BUILD_ID=${{ github.run_id }}-${{ github.run_attempt }}
+          # Refresh upstream packages on scheduled and explicitly requested rebuilds.
+          pull: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          no-cache: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Record published digest and component versions
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE_REVISION: ${{ github.sha }}
+          BUILD_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -eu
+          image_name="${IMAGE_TAGS%%:*}"
+          image_ref="$image_name@$IMAGE_DIGEST"
+          raw_manifest=$(docker buildx imagetools inspect --raw "$image_ref" 2>/dev/null || true)
+          for arch in amd64 arm64; do
+            arch_digest=$(echo "$raw_manifest" | jq -r --arg arch "$arch" '.manifests[]? | select(.platform.architecture == $arch and .platform.os == "linux") | .digest' 2>/dev/null || true)
+            target_ref="${image_name}@${arch_digest:-$IMAGE_DIGEST}"
+            docker run --rm --platform "linux/$arch" --network none \
+              --cap-drop=ALL --security-opt=no-new-privileges \
+              "$target_ref" cat /opt/ai/build-info.json > "build-info-$arch.json" || {
+                echo '{"error": "Failed to inspect image for '"$arch"'"}' > "build-info-$arch.json"
+              }
+            docker rmi "$target_ref" >/dev/null 2>&1 || true
+          done
+          jq -n --arg image "$image_ref" --arg revision "$SOURCE_REVISION" \
+            --arg build "$BUILD_ID" --slurpfile amd64 build-info-amd64.json \
+            --slurpfile arm64 build-info-arm64.json \
+            '{image: $image, source_revision: $revision, build_id: $build,
+              inventories: {amd64: $amd64[0], arm64: $arm64[0]}}' > release-info.json
+          {
+            echo 'Published image (pin this digest):'
+            echo
+            echo "\`$image_ref\`"
+            echo
+            for arch in amd64 arm64; do
+              echo "Resolved components ($arch):"
+              echo '```json'
+              cat "build-info-$arch.json"
+              echo '```'
+              echo
+            done
+            echo 'These inventories and the digest are also in the release-info artifact.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release identity
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-info-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release-info.json
+            build-info-amd64.json
+            build-info-arm64.json
